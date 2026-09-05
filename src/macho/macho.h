@@ -9,16 +9,19 @@
 #include <string>
 #include <vector>
 
+// Represents the architecture of a Mach-O file
 enum class Architecture {
     ARM64, X86_64, Unknown
 };
 
+// Represents a section in a Mach-O file
 struct CodeSection {
     uint64_t address;
     uint64_t size;
     uint64_t fileOffset;
 };
 
+// Represents a Mach-O file
 class MachO {
 public:
     MachO(const std::string& path);
