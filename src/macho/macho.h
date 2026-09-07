@@ -21,13 +21,32 @@ struct CodeSection {
     uint64_t fileOffset;
 };
 
+struct MachOSegment {
+    std::string name;
+
+    uint64_t vmAddress;
+    uint64_t vmSize;
+    uint64_t fileOffset;
+    uint64_t fileSize;
+    uint64_t maxProtection;
+    uint64_t initialProtection;
+};
+
 // Represents a Mach-O file
 class MachO {
 public:
     MachO(const std::string& path);
     void Inspect();
-    CodeSection FindCodeSection() const;
-    Architecture GetArchitecture() const;
+    void AppendData(const std::vector<uint8_t>& data);
+    void Save(const std::string& path);
+
+    [[nodiscard]] CodeSection FindCodeSection() const;
+    [[nodiscard]] Architecture GetArchitecture() const;
+    [[nodiscard]] std::vector<MachOSegment> GetSegments() const;
+    [[nodiscard]] size_t GetSize() const;
+
+    void AddPayloadSection(const std::vector<uint8_t>& payload, const std::string& symbolName);
+    void AddDefinedSymbol(const std::string& symbolName, uint64_t address, uint8_t sectionIndex);
 
 private:
     std::string filepath;

@@ -1,8 +1,19 @@
 #include <iostream>
+
+#include "src/macho/injector.h"
 #include "src/macho/macho.h"
 #include "src/payload/Payload.h"
 
 int main() {
+
+    std::string targetPath = "/Users/dmitri/Documents/working/sre-code-injection/src/sample/a.out";
+    std::string targetSavePath = "/Users/dmitri/Documents/working/sre-code-injection/src/sample/a_saved.out";
+    std::string payloadPath = "/Users/dmitri/Documents/working/sre-code-injection/src/sample/payload/payload.o";
+
+    Injector injector = Injector(targetPath, payloadPath);
+    injector.Inject();
+    injector.Save(targetSavePath);
+
     // Create a MachO object for the sample binary and inspect it to find the __TEXT, __text section
     MachO macho = MachO("/Users/dmitri/Documents/working/sre-code-injection/src/sample/sample");
 

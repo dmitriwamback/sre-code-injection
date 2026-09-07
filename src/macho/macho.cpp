@@ -8,6 +8,10 @@
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
+#include <algorithm>
+#include <cstring>
+#include <limits>
+#include <mach-o/nlist.h>
 
 // MachO class implementation
 MachO::MachO(const std::string& path) {
@@ -118,7 +122,7 @@ void MachO::Inspect() {
             for (uint32_t s = 0; s < segment->nsects; s++) {
 
                 // Check if the section pointer is within the bounds of the data vector and throw an error if it isn't
-                const auto* section_end = reinterpret_cast<const uint8_t*>(section + sizeof(section_64));
+                const auto* section_end = reinterpret_cast<const uint8_t*>(section) + sizeof(section_64);
                 if (section_end > end) {
                     throw std::runtime_error("Section exceeds beyond file");
                 }
@@ -191,7 +195,7 @@ CodeSection MachO::FindCodeSection() const {
 
                 // Check if the current section is the __TEXT, __text section and return its information if it is
                 if (std::string(section->sectname) == "__text" && std::string(section->segname) == "__TEXT") {
-                    CodeSection code_section;
+                    CodeSection code_section{};
                     code_section.address    = section->addr;
                     code_section.size       = section->size;
                     code_section.fileOffset = section->offset;
@@ -233,5 +237,367 @@ Architecture MachO::GetArchitecture() const {
             return Architecture::ARM64;
         default:
             return Architecture::Unknown;
+    }
+}
+
+std::vector<MachOSegment> MachO::GetSegments() const {
+    if (data.size() < sizeof(mach_header_64)) {
+        throw std::runtime_error("File is too small");
+    }
+    const auto* header = reinterpret_cast<const mach_header_64*>(data.data());
+
+    if (header->magic != MH_MAGIC_64) {
+        throw std::runtime_error("File is not a Mach-O file");
+    }
+
+    const uint8_t* cursor = data.data() + sizeof(mach_header_64);
+    const uint8_t* end = data.data() + data.size();
+
+    std::vector<MachOSegment> segments;
+
+    for (uint32_t i = 0; i < header->ncmds; i++) {
+        if (cursor + sizeof(load_command) > end) {
+            throw std::runtime_error("Load command exceeds beyond file");
+        }
+
+        const auto* command = reinterpret_cast<const load_command*>(cursor);
+
+        if (command->cmdsize < sizeof(load_command)) {
+            throw std::runtime_error("Invalid load command size");
+        }
+
+        if (cursor + command->cmdsize > end) {
+            throw std::runtime_error("Load command exceeds beyond file");
+        }
+
+        if (command->cmd == LC_SEGMENT_64) {
+
+            if (command->cmdsize < sizeof(segment_command_64)) {
+                throw std::runtime_error("Invalid LC_SEGMENT_64");
+            }
+
+            const auto* segment = reinterpret_cast<const segment_command_64*>(cursor);
+            MachOSegment seg{};
+            seg.name                = segment->segname;
+            seg.vmAddress           = segment->vmaddr;
+            seg.vmSize              = segment->vmsize;
+            seg.fileOffset          = segment->fileoff;
+            seg.fileSize            = segment->filesize;
+            seg.maxProtection       = segment->maxprot;
+            seg.initialProtection   = segment->initprot;
+
+            segments.push_back(seg);
+        }
+        cursor += command->cmdsize;
+    }
+    return segments;
+}
+
+void MachO::AppendData(const std::vector<uint8_t>& bytes) {
+    if (bytes.empty()) {
+        throw std::runtime_error("File is empty");
+    }
+
+    data.insert(data.end(), bytes.begin(), bytes.end());
+}
+
+void MachO::AddPayloadSection(const std::vector<uint8_t> &payload, const std::string& symbolName) {
+    if (payload.empty()) {
+        throw std::runtime_error("Payload is empty");
+    }
+
+    if (data.size() < sizeof(mach_header_64)) {
+        throw std::runtime_error("File is too small");
+    }
+
+    if (symbolName.empty()) {
+        throw std::runtime_error("Symbol name is empty");
+    }
+
+    auto* header = reinterpret_cast<const mach_header_64*>(data.data());
+    if (header->magic != MH_MAGIC_64) {
+        throw std::runtime_error("File is not a Mach-O file");
+    }
+
+    section_64 *textSection = nullptr;
+    segment_command_64 *textSegment = nullptr;
+    uint32_t textSectionIndex = 0;
+    uint32_t currentSectionIndex = 1;
+
+    uint8_t* cursor = data.data() + sizeof(mach_header_64);
+    uint8_t* end = data.data() + data.size();
+
+    for (uint32_t i = 0; i < header->ncmds; i++) {
+        if (cursor + sizeof(load_command) > end) {
+            throw std::runtime_error("Load command exceeds beyond file");
+        }
+
+        auto* command = reinterpret_cast<const load_command*>(cursor);
+        if (command->cmdsize < sizeof(load_command) || cursor + command->cmdsize > end) {
+            throw std::runtime_error("Invalid load command size");
+        }
+
+        if (command->cmd == LC_SEGMENT_64) {
+            auto* segment = reinterpret_cast<segment_command_64*>(cursor);
+            const uint64_t requiredSize = sizeof(segment_command_64) + static_cast<uint64_t>(segment->nsects) * sizeof(section_64);
+
+            if (requiredSize > command->cmdsize) {
+                throw std::runtime_error("LC_SEGMENT_64 section table exceeds command");
+            }
+
+            auto* sections = reinterpret_cast<section_64*>(cursor + sizeof(segment_command_64));
+
+            for (uint32_t s = 0; s < segment->nsects; s++) {
+                auto* section = &sections[s];
+
+                if (std::strncmp(section->segname, "__TEXT", sizeof(section->segname)) == 0 && std::strncmp(section->sectname, "__text", sizeof(section->sectname)) == 0) {
+                    textSection = section;
+                    textSegment = segment;
+                    textSectionIndex = currentSectionIndex + s;
+                    break;
+                }
+            }
+
+            if (textSection) {
+                break;
+            }
+
+            currentSectionIndex += segment->nsects;
+        }
+        cursor += command->cmdsize;
+    }
+
+    if (!textSection || !textSegment) {
+        throw std::runtime_error("Could not find __TEXT, __text");
+    }
+
+    const uint64_t textOffset = textSection->offset;
+    const uint64_t oldTextSize = textSection->size;
+    const uint64_t textEnd = textOffset + oldTextSize;
+
+    if (textEnd > data.size()) {
+        throw std::runtime_error("__text extends beyond file");
+    }
+
+    uint64_t nextSectionOffset = UINT64_MAX;
+    cursor = data.data() + sizeof(mach_header_64);
+    currentSectionIndex = 1;
+
+    for (uint32_t i = 0; i < header->ncmds; i++) {
+        if (cursor + sizeof(load_command) > end) {
+            throw std::runtime_error("Load command exceeds beyond file");
+        }
+
+        auto* command = reinterpret_cast<const load_command*>(cursor);
+        if (command->cmdsize < sizeof(load_command) || cursor + command->cmdsize > end) {
+            throw std::runtime_error("Invalid load command size");
+        }
+
+        if (command->cmd == LC_SEGMENT_64) {
+            auto* segment = reinterpret_cast<const segment_command_64*>(cursor);
+            const uint64_t requiredSize = static_cast<uint64_t>(segment->nsects) * sizeof(section_64) + sizeof(segment_command_64);
+
+            if (requiredSize > command->cmdsize) {
+                throw std::runtime_error("LC_SEGMENT_64 section table exceeds command");
+            }
+
+            auto* sections = reinterpret_cast<section_64*>(cursor + sizeof(segment_command_64));
+
+            for (uint32_t s = 0; s < segment->nsects; s++) {
+                auto* section = &sections[s];
+
+                if (section->size != 0 && section->offset > textEnd) {
+                    nextSectionOffset = std::min(nextSectionOffset, static_cast<uint64_t>(section->offset));
+                }
+            }
+
+            currentSectionIndex += segment->nsects;
+        }
+
+        cursor += command->cmdsize;
+    }
+
+    if (nextSectionOffset == UINT64_MAX) {
+        throw std::runtime_error("Could not find space after __text");
+    }
+
+    if (nextSectionOffset < textEnd) {
+        throw std::runtime_error("Mach-O section overlap");
+    }
+
+    const uint64_t alignment = 1ULL << textSection->align;
+    const uint64_t functionOffset = (textEnd + alignment - 1) & ~(alignment - 1);
+    const uint64_t padding = functionOffset - textEnd;
+    const uint64_t requiredSpace = padding + payload.size();
+    const uint64_t available = nextSectionOffset - textEnd;
+
+    if (requiredSpace > available) {
+        std::cerr
+        << "Payload does not fit:\n"
+        << "  payload size:   " << payload.size() << "\n"
+        << "  text offset:    0x" << std::hex << textOffset << "\n"
+        << "  old text size:  0x" << oldTextSize << "\n"
+        << "  text end:       0x" << textEnd << "\n"
+        << "  next section:   0x" << nextSectionOffset << "\n"
+        << "  available:      0x" << available << "\n"
+        << "  alignment:      0x" << alignment << "\n"
+        << "  function offset:0x" << functionOffset << "\n"
+        << "  padding:         0x" << padding << "\n"
+        << "  required space:  0x" << requiredSpace << std::dec << "\n";
+
+        throw std::runtime_error("payload does not fit in __text slack");
+    }
+
+    const uint64_t segmentFileEnd = static_cast<uint64_t>(textSegment->fileoff) + textSegment->filesize;
+    const uint64_t newFileEnd = functionOffset + payload.size();
+
+    if (newFileEnd > segmentFileEnd) {
+        throw std::runtime_error("payload would extend __TEXT segment");
+    }
+
+    const uint64_t functionAddress = textSection->addr + (functionOffset - textSection->offset);
+    std::copy(payload.begin(), payload.end(), data.begin() + functionOffset);
+
+    const uint64_t newTextSize = functionOffset - textSection->offset + payload.size();
+    textSection->size = newTextSize;
+
+    AddDefinedSymbol(symbolName, functionAddress, textSectionIndex);
+}
+
+void MachO::AddDefinedSymbol(const std::string &symbolName, uint64_t address, uint8_t sectionIndex) {
+    if (symbolName.empty()) {
+        throw std::runtime_error("Symbol name is empty");
+    }
+
+    mach_header_64* header = reinterpret_cast<mach_header_64*>(data.data());
+    symtab_command* symtab = nullptr;
+    dysymtab_command* dysymtab = nullptr;
+    uint64_t symtabOffset = 0;
+
+    uint8_t* cursor = data.data() + sizeof(mach_header_64);
+    uint8_t* end = data.data() + data.size();
+
+    for (uint32_t i = 0; i < header->ncmds; i++) {
+        if (cursor + sizeof(load_command) > end) {
+            throw std::runtime_error("Load command exceeds beyond file");
+        }
+        auto* command = reinterpret_cast<const load_command*>(cursor);
+
+        if (command->cmdsize < sizeof(load_command) || cursor + command->cmdsize > end) {
+            throw std::runtime_error("Invalid load command size");
+        }
+
+        if (command->cmd == LC_SYMTAB) {
+            symtab = reinterpret_cast<symtab_command*>(cursor);
+            symtabOffset = static_cast<uint64_t>(cursor - data.data());
+        }
+        else if (command->cmd == LC_DYSYMTAB) {
+            dysymtab = reinterpret_cast<dysymtab_command*>(cursor);
+        }
+
+        cursor += command->cmdsize;
+    }
+
+    if (!symtab) {
+        throw std::runtime_error("Could not find symtab");
+    }
+
+    const uint64_t oldSymBytes = static_cast<uint64_t>(symtab->nsyms) * sizeof(nlist_64);
+    if (static_cast<uint64_t>(symtab->symoff) + oldSymBytes > data.size()) {
+        throw std::runtime_error("Symbol table exceeds file");
+    }
+
+    if (static_cast<uint64_t>(symtab->stroff) + symtab->strsize > data.size()) {
+        throw std::runtime_error("Symbol table exceeds file");
+    }
+
+    auto* oldSymbols = reinterpret_cast<const nlist_64*>(data.data() + symtab->symoff);
+    const char* oldStrings = reinterpret_cast<const char*>(data.data() + symtab->stroff);
+
+    for (uint32_t i = 0; i < symtab->nsyms; i++) {
+        const nlist_64& symbol = oldSymbols[i];
+        if (symbol.n_un.n_strx >= symtab->strsize) {
+            throw std::runtime_error("Invalid symbol string index");
+        }
+
+        const char* existingName = oldStrings + symbol.n_un.n_strx;
+        if (symbolName == existingName) {
+            throw std::runtime_error("symbol already exists");
+        }
+    }
+
+    std::vector<uint8_t> strings(data.begin() + symtab->stroff, data.begin() + symtab->stroff + symtab->strsize);
+    if (strings.empty() || strings[0] == '\0') {
+        throw std::runtime_error("Invalid string table");
+    }
+
+    const uint32_t newStringIndex = static_cast<uint32_t>(strings.size());
+    strings.insert(strings.end(), symbolName.begin(), symbolName.end());
+    strings.push_back('\0');
+
+    std::vector<nlist_64> symbols(oldSymbols, oldSymbols + symtab->nsyms);
+    nlist_64 newSymbol{};
+    newSymbol.n_un.n_strx = newStringIndex;
+    newSymbol.n_type = N_SECT | N_EXT;
+    newSymbol.n_sect = sectionIndex;
+    newSymbol.n_desc = 0;
+    newSymbol.n_value = address;
+
+    uint32_t newSymbolIndex = 0;
+    if (dysymtab) {
+        const uint64_t localEnd = static_cast<uint64_t>(dysymtab->ilocalsym) + dysymtab->nlocalsym;
+        const uint64_t undefEnd = static_cast<uint64_t>(dysymtab->iundefsym) + dysymtab->nundefsym;
+        const uint64_t extEnd = static_cast<uint64_t>(dysymtab->iextdefsym) + dysymtab->nextdefsym;
+
+        if (localEnd > symbols.size() || extEnd > symbols.size() || undefEnd > symbols.size()) {
+            throw std::runtime_error("Invalid LC_DYSYMTAB");
+        }
+
+        newSymbolIndex = dysymtab->iextdefsym + dysymtab->nextdefsym;
+        symbols.insert(symbols.begin() + newSymbolIndex, newSymbol);
+        dysymtab->nextdefsym++;
+        dysymtab->iundefsym++;
+    }
+    else {
+        newSymbolIndex = static_cast<uint32_t>(symbols.size());
+        symbols.push_back(newSymbol);
+        //++symtab->nsyms;
+    }
+
+    const uint64_t symbolOffset = (data.size() + 7) & ~uint64_t(7);
+    if (symbolOffset > data.size()) {
+        data.resize(symbolOffset, 0);
+    }
+
+    const uint64_t symbolBytes = static_cast<uint64_t>(symbols.size()) * sizeof(nlist_64);
+    const uint64_t stringOffset = symbolOffset + symbolBytes;
+    const uint64_t newFileSize = stringOffset + strings.size();
+
+    data.resize(newFileSize);
+
+    auto newSymtab = reinterpret_cast<symtab_command*>(data.data() + symtabOffset);
+    newSymtab->symoff = static_cast<uint32_t>(symbolOffset);
+    newSymtab->nsyms = static_cast<uint32_t>(symbols.size());
+    newSymtab->stroff = static_cast<uint32_t>(stringOffset);
+    newSymtab->strsize = static_cast<uint32_t>(strings.size());
+
+    std::memcpy(data.data() + symbolOffset, symbols.data(), symbolBytes);
+    std::memcpy(data.data() + stringOffset, strings.data(), strings.size());
+}
+
+size_t MachO::GetSize() const {
+    return data.size();
+}
+
+void MachO::Save(const std::string &path) {
+    std::ofstream out(path, std::ios::binary);
+
+    if (!out) {
+        throw std::runtime_error("Could not open file for writing");
+    }
+
+    out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    if (!out) {
+        throw std::runtime_error("Could not write to file");
     }
 }

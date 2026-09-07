@@ -314,7 +314,7 @@ void Payload::ParseSymbols() {
 void Payload::LocateEntryPoint() {
 
     // Define the name of the entry point symbol to search for in the symbols vector
-    constexpr const char* entryName = "_payload_function";
+    constexpr const char* entryName = "_testFunction";
 
     // Iterate through the symbols vector to find the entry point symbol and store its information in the entryPoint member variable
     for (const auto& symbol : symbols) {

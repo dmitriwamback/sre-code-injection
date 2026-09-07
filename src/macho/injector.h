@@ -19,7 +19,7 @@ class Injector {
 public:
     Injector(const std::string& targetPath, const std::string& payloadPath);
     InjectionResult Inject();
-    void Save(const std::string& outputPath) const;
+    void Save(const std::string& outputPath);
 
 private:
     void ValidateCompatibility();
