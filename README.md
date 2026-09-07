@@ -5,5 +5,5 @@
 ### September 7 Log: 
 
 <p>As of September 7, 2026, only Mach-O injection is in process of development. Additionally, code signing is not fully implemented. This makes the saved Mach-O files unable to run without crashing.</p>
-<p>The first milestone is when disassembling the file, the payload function appears in the saved output.</p>
+<p>The first milestone is when disassembling the output file, the payload function appears in the file.</p>
 <p>Next milestone is to upload a payload larger (in bytes) than the number of available bytes in the target program.</p>
